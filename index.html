@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Progress & Decay</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@700;900&display=swap');
+
+        /* 
+         * CSS Variables driving the visual state 
+         */
+        :root {
+            --progress: 0;
+            --decay: 0;
+            --shake-x: 0px;
+            --shake-y: 0px;
+            --glitch-clip: none;
+            --crack-opacity: 0;
+            --rust-opacity: 0;
+            --text-skew: 0deg;
+            
+            /* Aesthetics - B&W Theme */
+            --bg-color: #ffffff;
+            --btn-bg: #ffffff;
+            --btn-border: #000000;
+            --energy-color: #000000;
+            --energy-shadow: rgba(0, 0, 0, 0.4);
+            --rust-color: #444444;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            background-color: var(--bg-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+            color: #000;
+            user-select: none;
+        }
+
+        .container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* 
+         * 1. The Initial State (Pristine)
+         * A visually striking solid button 
+         */
+        .action-btn {
+            position: relative;
+            width: 340px;
+            height: 90px;
+            background-color: var(--btn-bg);
+            border: 3px solid var(--btn-border);
+            border-radius: 45px;
+            overflow: hidden; /* Clips the rectangular progress bar */
+            color: #000;
+            cursor: pointer;
+            z-index: 10;
+            outline: none;
+            backdrop-filter: blur(5px);
+            
+            /* Text & Layout */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.5rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            
+            /* Decaying Physics */
+            transform: translate3d(var(--shake-x), var(--shake-y), 0);
+            clip-path: var(--glitch-clip);
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.05);
+
+            /* Very fast transitions */
+            transition: border-color 0.1s ease-out, box-shadow 0.1s ease-out;
+        }
+
+        .action-btn:hover {
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            border-color: #000;
+        }
+
+        /* 
+         * 2. The Interaction (Progress bar overlay nested inside the button logic)
+         * Filled using a pseudo element and --progress scalar variable
+         */
+        .action-btn::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            width: calc(var(--progress) * 1%);
+            background-color: #000000;
+            box-shadow: inset -5px 0 15px rgba(255, 255, 255, 0.2);
+            z-index: 1; /* Below text, above rust */
+            pointer-events: none;
+        }
+
+        /* 
+         * 3A. The Consequence - Rusting/Desaturation (Decay > 30%)
+         * An overlay that darkens, desaturates, and rusts the button 
+         */
+        .rust-overlay {
+            display: none; /* Removed grey noise overlay */
+        }
+
+        /* 
+         * 3B. The Consequence - Heavy Damage Cracks (Decay > 70%)
+         * Simulating fractures where energy leaks out
+         */
+        .cracks {
+            position: absolute;
+            inset: 0;
+            /* Layered sharp linear gradients simulating hard black cracks */
+            background-image: 
+                linear-gradient(110deg, transparent 20%, #000 20%, #000 21.5%, transparent 21.5%),
+                linear-gradient(-45deg, transparent 60%, #000 60%, #000 61.5%, transparent 61.5%),
+                linear-gradient(85deg, transparent 80%, #000 80%, #000 81.5%, transparent 81.5%);
+            display: var(--crack-display, none);
+            z-index: 3;
+            pointer-events: none;
+        }
+
+        /* 
+         * Dynamic Text Glitch and Text Wrapper 
+         */
+        .btn-text {
+            position: relative;
+            z-index: 4;
+            pointer-events: none;
+            transform: skewX(var(--text-skew));
+            
+            /* Text invert trick */
+            mix-blend-mode: difference;
+            color: #ffffff; 
+        }
+
+        /* 
+         * Particle Exploder Canvas (Layered above the button) 
+         */
+        #particles-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            pointer-events: none;
+            z-index: 20;
+        }
+
+        .shattered {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Overlay canvas for particle effects -->
+        <canvas id="particles-canvas"></canvas>
+
+        <!-- The core interactable element -->
+        <button class="action-btn" id="action-btn">
+            <div class="rust-overlay"></div>
+            <div class="cracks"></div>
+            <span class="btn-text" id="btn-text">Progress?</span>
+        </button>
+    </div>
+
+    <script>
+        /**
+         * State Management & Physics Drivers
+         */
+        const btn = document.getElementById('action-btn');
+        const btnText = document.getElementById('btn-text');
+        const root = document.documentElement;
+        
+        // Core variables
+        let shattered = false;
+        let shatterTime = null;
+        let progress = 0;       // [0, 100]
+        let decay = 0;          // [0, 100] - Tracks historical damage
+        let isHolding = false;
+        
+        // Canvas Setup
+        const canvas = document.getElementById('particles-canvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+
+        let btnRect = btn.getBoundingClientRect();
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            // Update button geometry reference dynamically as well
+            if (!shattered) btnRect = btn.getBoundingClientRect();
+        }
+        window.addEventListener('resize', resize);
+        
+        resize();
+
+        // Timing for animation loops
+        let lastTime = performance.now();
+
+        // Particle Tracking Arrays
+        const debrisList = [];
+        const explosionList = [];
+
+        /**
+         * Event Listeners for Interaction 
+         */
+        const startHold = (e) => {
+            if (shattered) return;
+            // Accept left click or touch
+            if (e.type === 'mousedown' && e.button !== 0) return; 
+            isHolding = true;
+            // Disable default touch behaviors to prevent drag-canceling
+            if (e.type === 'touchstart') e.preventDefault();
+        };
+
+        const releaseHold = () => {
+            isHolding = false;
+        };
+
+        btn.addEventListener('mousedown', startHold);
+        btn.addEventListener('touchstart', startHold, { passive: false });
+        
+        window.addEventListener('mouseup', releaseHold);
+        window.addEventListener('touchend', releaseHold);
+        window.addEventListener('touchcancel', releaseHold);
+
+
+        /**
+         * System Definitions: 
+         * Particle Class models falling crumbling debris and explosive shards.
+         */
+        class Particle {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.type = type; // 'debris' or 'explosion'
+                this.life = 1.0;
+                // Explosion particles are massive jagged shards, debris is coarse dirt
+                this.size = type === 'explosion' ? Math.random() * 35 + 10 : Math.random() * 12 + 4; 
+
+                const angle = Math.random() * Math.PI * 2;
+                
+                if (type === 'explosion') {
+                    // Explosions shoot out violently in all directions
+                    const speed = Math.random() * 45 + 10; // Much faster
+                    this.vx = Math.cos(angle) * speed;
+                    this.vy = Math.sin(angle) * speed;
+                    this.decayRate = Math.random() * 0.01 + 0.003; // Last longer
+                    // Invert explosion fragments to white to perfectly contrast the detonated black screen
+                    this.color = '#ffffff';
+                    this.glow = false;
+                } else {
+                    // Debris mostly crumbles downwards
+                    const speed = Math.random() * 3 + 0.5;
+                    this.vx = (Math.random() - 0.5) * 2; // slight horizontal drift
+                    this.vy = Math.abs(Math.sin(angle)) * speed; 
+                    this.decayRate = Math.random() * 0.03 + 0.01;
+                    // Pure Black
+                    this.color = '#000000';
+                    this.glow = false;
+                }
+
+                this.rotation = Math.random() * Math.PI * 2;
+                this.rotSpeed = (Math.random() - 0.5) * 0.2;
+            }
+
+            update(dtScale) {
+                // Gravity applies to both, but harder to debris
+                this.vy += (this.type === 'explosion' ? 0.2 : 0.4) * dtScale;
+                
+                // Friction for explosion particles so they explode outwards then "float/fall"
+                if (this.type === 'explosion') {
+                    this.vx *= Math.pow(0.95, dtScale);
+                    this.vy *= Math.pow(0.96, dtScale);
+                }
+
+                this.x += this.vx * dtScale;
+                this.y += this.vy * dtScale;
+                this.rotation += this.rotSpeed * dtScale;
+                this.life -= this.decayRate * dtScale;
+            }
+
+            draw(ctx) {
+                if (this.life <= 0) return;
+
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+                
+                // Scale physical size instead of using globalAlpha (which causes grey blending)
+                let currentSize = Math.max(0, this.size * this.life);
+                
+                ctx.fillStyle = this.color;
+                ctx.fillRect(-currentSize/2, -currentSize/2, currentSize, currentSize);
+                
+                ctx.restore();
+            }
+        }
+
+        /**
+         * Generates a jagged polygon path simulating structural chunks missing.
+         * The higher the intensity, the deeper the missing pieces.
+         */
+        function generateJaggedPath(intensity) {
+            if (intensity <= 0) return 'none';
+            
+            const points = [];
+            const segments = 6; 
+            
+            // Generate top edge
+            for(let i=0; i<=segments; i++) {
+                const x = (100 / segments) * i;
+                const y = (i !== 0 && i !== segments) ? Math.random() * intensity : 0;
+                points.push(`${x}% ${y}%`);
+            }
+            // Generate right edge
+            for(let i=1; i<=segments; i++) {
+                const y = (100 / segments) * i;
+                const x = (i !== segments) ? 100 - (Math.random() * intensity) : 100;
+                points.push(`${x}% ${y}%`);
+            }
+            // Generate bottom edge (reverse x)
+            for(let i=segments-1; i>=0; i--) {
+                const x = (100 / segments) * i;
+                const y = (i !== 0) ? 100 - (Math.random() * intensity) : 100;
+                points.push(`${x}% ${y}%`);
+            }
+            // Generate left edge (reverse y)
+            for(let i=segments-1; i>0; i--) {
+                const y = (100 / segments) * i;
+                const x = Math.random() * intensity;
+                points.push(`${x}% ${y}%`);
+            }
+
+            return `polygon(${points.join(', ')})`;
+        }
+
+
+        /**
+         * Main Application Physics Loop
+         */
+        function tick(time) {
+            // Delta time calculation for smooth physics across refresh rates
+            const dt = time - lastTime;
+            lastTime = time;
+            const dtScale = Math.min(dt / 16.66, 3); // Normalize against 60fps, cap skips
+
+            if (!shattered) {
+                updateCoreLogic(dt, dtScale);
+                applyVisualState();
+            }
+
+            renderCanvas(dtScale);
+            
+            requestAnimationFrame(tick);
+        }
+
+        function updateCoreLogic(dt, dtScale) {
+            // PROGRESS BAR LOGIC
+            if (isHolding) {
+                // It takes approximately 3.5 seconds to reach 100%
+                progress += (100 / 3500) * dt;
+            } else {
+                // If released early, drain progress rapidly (1.5 seconds)
+                progress -= (100 / 1500) * dt;
+            }
+            progress = Math.max(0, Math.min(100, progress));
+
+            // DECAY LOGIC (The consequence metric)
+            // Decay is driven up by progress. You push the limit, you damage the structure.
+            if (progress > decay) {
+                // Pushing beyond current historical decay increases it
+                decay = progress;
+            } else if (!isHolding && decay > 0) {
+                // If not currently holding, the structure "heals" or settles very slowly
+                // (Takes about 15 seconds to fully heal from 100)
+                decay -= (100 / 15000) * dt;
+            }
+            decay = Math.max(0, Math.min(100, decay));
+
+            // SHATTER CONDITION
+            if (progress >= 100) {
+                triggerShatterClimax();
+            }
+        }
+
+        function applyVisualState() {
+            // Export variables to CSS
+            root.style.setProperty('--progress', progress.toFixed(2));
+            
+            // General visual states based on progress and hold
+            if (isHolding) {
+                btnText.textContent = `${Math.floor(progress)}%`;
+                btn.style.borderColor = '#000000';
+            } else {
+                if (decay > 5 && progress === 0) {
+                    btnText.textContent = 'SYSTEM DAMAGED';
+                } else if (progress > 0) {
+                    btnText.textContent = 'ABORTING...';
+                } else {
+                    btnText.textContent = 'Progress?';
+                }
+                btn.style.borderColor = '#000000';
+            }
+
+            // STAGE 1: Vibration and Glitch (Decay > 10%)
+            if (decay > 10) {
+                // Vibration intensity scales with decay
+                const vIntensity = (decay - 10) * 0.05; // Reduced shake
+                root.style.setProperty('--shake-x', `${(Math.random() - 0.5) * vIntensity}px`);
+                root.style.setProperty('--shake-y', `${(Math.random() - 0.5) * vIntensity}px`);
+
+                // Minor text skewing
+                root.style.setProperty('--text-skew', `${(Math.random() - 0.5) * (decay * 0.02)}deg`);
+            } else {
+                root.style.setProperty('--shake-x', `0px`);
+                root.style.setProperty('--shake-y', `0px`);
+                root.style.setProperty('--text-skew', `0deg`);
+            }
+
+            // STAGE 2: Rusting, Crumbling, and Debris Particles (Decay > 30%)
+            if (decay > 30) {
+                // Rust Overlay
+                const rustAmount = (decay - 30) / 70; // 0.0 to 1.0
+                root.style.setProperty('--rust-opacity', rustAmount);
+
+                // Emit Physical Particle Debris from bottom of the button
+                if (isHolding) {
+                    btnRect = btn.getBoundingClientRect();
+                    // Heavily increased particle count mapping to decay severity
+                    const spawnCount = Math.floor(Math.random() * 6 * rustAmount) + (Math.random() < rustAmount ? 1 : 0);
+                    
+                    for (let i = 0; i < spawnCount; i++) {
+                        const spawnX = btnRect.left + (Math.random() * btnRect.width);
+                        const spawnY = btnRect.bottom - Math.random() * 10;
+                        debrisList.push(new Particle(spawnX, spawnY, 'debris'));
+                    }
+                }
+            } else {
+                root.style.setProperty('--rust-opacity', 0);
+            }
+
+            // STAGE 3: Heavy Damage & Energy Bleeding (Decay > 70%)
+            if (decay > 70) {
+                root.style.setProperty('--crack-display', 'block');
+                
+                // Introduce extreme visual distortion and screen jitter at high damage
+                if (Math.random() < (decay - 70) / 100) {
+                    btn.style.filter = 'invert(1)';
+                    document.body.style.backgroundColor = '#000000';
+                } else {
+                    btn.style.filter = 'none';
+                    document.body.style.backgroundColor = '#ffffff';
+                }
+            } else {
+                root.style.setProperty('--crack-display', 'none');
+                btn.style.filter = 'none';
+                if (!shattered) document.body.style.backgroundColor = '#ffffff';
+            }
+        }
+
+        function triggerShatterClimax() {
+            shattered = true;
+            shatterTime = performance.now();
+            isHolding = false;
+            
+            // Background goes stark black on explosion
+            document.body.style.backgroundColor = '#000000';
+            
+            // Hide the DOM button entirely
+            btn.classList.add('shattered');
+            
+            // Refresh coords just in case
+            btnRect = btn.getBoundingClientRect();
+            
+            // Generate massive explosion particles filling the rectangle area
+            const density = 800; // Tremendously more particles
+            for(let i=0; i<density; i++) {
+                const px = btnRect.left + Math.random() * btnRect.width;
+                const py = btnRect.top + Math.random() * btnRect.height;
+                explosionList.push(new Particle(px, py, 'explosion'));
+            }
+
+            // Generate secondary explosion originating from the right side of the screen
+            for(let i=0; i<density; i++) {
+                const pxRight = window.innerWidth - (Math.random() * 20);
+                const pyRight = (window.innerHeight / 2) + ((Math.random() - 0.5) * 200);
+                explosionList.push(new Particle(pxRight, pyRight, 'explosion'));
+            }
+        }
+
+        function renderCanvas(dtScale) {
+            ctx.clearRect(0, 0, width, height);
+
+            // Process Debris
+            for(let i=debrisList.length - 1; i>=0; i--) {
+                const p = debrisList[i];
+                p.update(dtScale);
+                if (p.life <= 0) debrisList.splice(i, 1);
+                else p.draw(ctx);
+            }
+
+            // Process Explosion Shards
+            for(let i=explosionList.length - 1; i>=0; i--) {
+                const p = explosionList[i];
+                p.update(dtScale);
+                if (p.life <= 0) explosionList.splice(i, 1);
+                else p.draw(ctx);
+            }
+
+            // High-Impact Screen FX on Explosion
+            if (shattered) {
+                const elapsed = performance.now() - shatterTime;
+                
+                // Massive expanding shockwave ring
+                if (elapsed < 1500) {
+                    ctx.save();
+                    ctx.beginPath();
+                    const radius = (elapsed / 1000) * (width * 1.2);
+                    ctx.arc(width/2, height/2, radius, 0, Math.PI * 2);
+                    ctx.lineWidth = Math.max(1, 50 - (elapsed / 30));
+                    ctx.strokeStyle = '#ffffff'; // White shockwave
+                    ctx.stroke();
+                    ctx.restore();
+                    
+                    // Violent Screen Shake
+                    const shake = Math.max(0, 40 - (elapsed / 25));
+                    document.body.style.transform = `translate(${(Math.random()-0.5)*shake}px, ${(Math.random()-0.5)*shake}px)`;
+                } else {
+                    document.body.style.transform = 'none';
+                }
+            }
+        }
+
+        // Kickoff
+        requestAnimationFrame(tick);
+    </script>
+</body>
+</html>
